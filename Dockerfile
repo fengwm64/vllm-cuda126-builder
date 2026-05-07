@@ -44,17 +44,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-pip \
     && ln -sf /usr/bin/python3.12 /usr/bin/python3 \
     && ln -sf /usr/bin/python3.12 /usr/bin/python \
+    && python3.12 -m ensurepip --upgrade \
+    && python3.12 -m pip install --upgrade pip setuptools wheel \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
 # Install PyTorch cu126 + FlashInfer cu126
-RUN pip install --no-cache-dir \
+RUN python3.12 -m pip install --no-cache-dir \
     torch==2.11.0 \
     torchvision==0.26.0 \
     torchaudio==2.11.0 \
     --index-url https://download.pytorch.org/whl/cu126
 
-RUN pip install --no-cache-dir \
+RUN python3.12 -m pip install --no-cache-dir \
     flashinfer-python==0.6.8.post1 \
     --extra-index-url https://flashinfer.ai/whl/cu126
 
@@ -69,11 +71,11 @@ WORKDIR /build/vllm
 RUN python use_existing_torch.py
 
 # Install build dependencies
-RUN pip install --no-cache-dir -r requirements/build/cuda.txt \
-    && pip install --no-cache-dir setuptools_scm
+RUN python3.12 -m pip install --no-cache-dir -r requirements/build/cuda.txt \
+    && python3.12 -m pip install --no-cache-dir setuptools_scm
 
 # Build and install vLLM
-RUN pip install --no-cache-dir --no-build-isolation .
+RUN python3.12 -m pip install --no-cache-dir --no-build-isolation .
 
 # -------- Stage 2: Runtime image --------
 FROM nvidia/cuda:12.6.0-base-ubuntu22.04 AS runtime
@@ -99,6 +101,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libcurand-dev-12-6 \
     && ln -sf /usr/bin/python3.12 /usr/bin/python3 \
     && ln -sf /usr/bin/python3.12 /usr/bin/python \
+    && python3.12 -m ensurepip --upgrade \
+    && python3.12 -m pip install --upgrade pip \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
@@ -108,7 +112,7 @@ COPY --from=builder /usr/local/bin/vllm /usr/local/bin/vllm
 COPY --from=builder /usr/local/bin/vllm-serve /usr/local/bin/vllm-serve
 
 # Install FlashInfer runtime (cu126 index)
-RUN pip install --no-cache-dir \
+RUN python3.12 -m pip install --no-cache-dir \
     flashinfer-python==0.6.8.post1 \
     --extra-index-url https://flashinfer.ai/whl/cu126
 
