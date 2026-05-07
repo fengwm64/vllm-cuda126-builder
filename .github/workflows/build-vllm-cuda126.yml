@@ -1,0 +1,112 @@
+name: Build vLLM Docker Image (CUDA 12.6)
+
+# Default build parameters (used by push trigger, overridden by workflow_dispatch)
+env:
+  DEFAULT_VLLM_VERSION: "v0.20.1"
+  DEFAULT_CUDA_ARCH_LIST: "8.0 8.6"
+  DEFAULT_MAX_JOBS: "4"
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/vllm
+
+on:
+  # Push to main branch - automatic build
+  push:
+    branches: [main]
+    paths:
+      - "Dockerfile"
+      - ".github/workflows/build-vllm-cuda126.yml"
+
+  # Manual trigger - override parameters
+  workflow_dispatch:
+    inputs:
+      vllm_version:
+        description: "vLLM version tag (e.g. v0.20.1)"
+        required: true
+        default: "v0.20.1"
+        type: string
+      torch_cuda_arch_list:
+        description: "CUDA architectures to compile (space-separated)"
+        required: true
+        default: "8.0 8.6"
+        type: string
+      max_jobs:
+        description: "MAX_JOBS for compilation (parallel build jobs)"
+        required: true
+        default: "4"
+        type: string
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360  # 6 hours - vLLM compilation is slow
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Resolve build parameters
+        id: params
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "vllm_version=${{ inputs.vllm_version }}" >> $GITHUB_OUTPUT
+            echo "cuda_arch_list=${{ inputs.torch_cuda_arch_list }}" >> $GITHUB_OUTPUT
+            echo "max_jobs=${{ inputs.max_jobs }}" >> $GITHUB_OUTPUT
+          else
+            echo "vllm_version=${{ env.DEFAULT_VLLM_VERSION }}" >> $GITHUB_OUTPUT
+            echo "cuda_arch_list=${{ env.DEFAULT_CUDA_ARCH_LIST }}" >> $GITHUB_OUTPUT
+            echo "max_jobs=${{ env.DEFAULT_MAX_JOBS }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (tags, labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=${{ steps.params.outputs.vllm_version }}-cu126
+            type=raw,value=latest-cu126,enable={{is_default_branch}}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VLLM_VERSION=${{ steps.params.outputs.vllm_version }}
+            TORCH_CUDA_ARCH_LIST=${{ steps.params.outputs.cuda_arch_list }}
+            MAX_JOBS=${{ steps.params.outputs.max_jobs }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Summary
+        run: |
+          echo "## Build Complete :rocket:" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Parameter | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| vLLM Version | \`${{ steps.params.outputs.vllm_version }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| CUDA Base | 12.6.0 |" >> $GITHUB_STEP_SUMMARY
+          echo "| GPU Architectures | \`${{ steps.params.outputs.cuda_arch_list }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| MAX_JOBS | ${{ steps.params.outputs.max_jobs }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Trigger | ${{ github.event_name }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Pull command" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+          echo "docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.params.outputs.vllm_version }}-cu126" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
