@@ -109,7 +109,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy Python packages from builder
 COPY --from=builder /usr/local/lib/python3.12/dist-packages /usr/local/lib/python3.12/dist-packages
 COPY --from=builder /usr/local/bin/vllm /usr/local/bin/vllm
-COPY --from=builder /usr/local/bin/vllm-serve /usr/local/bin/vllm-serve
 
 # Install FlashInfer runtime (cu126 index)
 RUN python3.12 -m pip install --no-cache-dir \
