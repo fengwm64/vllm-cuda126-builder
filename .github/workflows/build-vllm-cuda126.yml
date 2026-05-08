@@ -38,7 +38,7 @@ on:
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
-    timeout-minutes: 360  # 6 hours - vLLM compilation is slow
+    timeout-minutes: 600  # 10 hours - vLLM CUDA compilation is very slow on 2 vCPU runners
     permissions:
       contents: read
       packages: write
@@ -91,8 +91,8 @@ jobs:
             VLLM_VERSION=${{ steps.params.outputs.vllm_version }}
             TORCH_CUDA_ARCH_LIST=${{ steps.params.outputs.cuda_arch_list }}
             MAX_JOBS=${{ steps.params.outputs.max_jobs }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache,mode=max
 
       - name: Summary
         run: |
