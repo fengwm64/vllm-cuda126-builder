@@ -1,22 +1,20 @@
 name: Build vLLM Docker Image (CUDA 12.6)
 
-# Default build parameters (used by push trigger, overridden by workflow_dispatch)
 env:
   DEFAULT_VLLM_VERSION: "v0.20.1"
   DEFAULT_CUDA_ARCH_LIST: "8.0 8.6"
   DEFAULT_MAX_JOBS: "4"
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository_owner }}/vllm
+  IMAGE_NAME: ${{ github.repository_owner }}/vllm-openai
 
 on:
-  # Push to main branch - automatic build
   push:
     branches: [main]
     paths:
-      - "Dockerfile"
+      - "Dockerfile.builder"
+      - "Dockerfile.runtime"
       - ".github/workflows/build-vllm-cuda126.yml"
 
-  # Manual trigger - override parameters
   workflow_dispatch:
     inputs:
       vllm_version:
@@ -25,7 +23,7 @@ on:
         default: "v0.20.1"
         type: string
       torch_cuda_arch_list:
-        description: "CUDA architectures to compile (space-separated)"
+        description: "CUDA SM versions to compile (space-separated, e.g. '8.0 8.6 8.9')"
         required: true
         default: "8.0 8.6"
         type: string
@@ -38,7 +36,7 @@ on:
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
-    timeout-minutes: 600  # 10 hours - vLLM CUDA compilation is very slow on 2 vCPU runners
+    timeout-minutes: 600  # 10 hours
     permissions:
       contents: read
       packages: write
@@ -60,6 +58,12 @@ jobs:
             echo "max_jobs=${{ env.DEFAULT_MAX_JOBS }}" >> $GITHUB_OUTPUT
           fi
 
+          # Generate SM suffix for image tag (e.g. "8.0 8.6" -> "sm80-sm86")
+          SM_SUFFIX=$(echo "${{ inputs.torch_cuda_arch_list || env.DEFAULT_CUDA_ARCH_LIST }}" | tr ' ' '-' | sed 's/\./sm/g' | sed 's/sm//g; s/\([0-9]\)/sm\1/g')
+          # Simpler: just dot-replace
+          SM_SUFFIX=$(echo "${{ inputs.torch_cuda_arch_list || env.DEFAULT_CUDA_ARCH_LIST }}" | sed 's/ /-/g; s/\./sm/g')
+          echo "sm_suffix=${SM_SUFFIX}" >> $GITHUB_OUTPUT
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -70,43 +74,105 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract metadata (tags, labels)
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=raw,value=${{ steps.params.outputs.vllm_version }}-cu126
-            type=raw,value=latest-cu126,enable={{is_default_branch}}
+      # Step 1: Build wheel and export to local filesystem
+      - name: Build vLLM wheel
+        run: |
+          docker buildx build -f Dockerfile.builder \
+            --build-arg VLLM_VERSION=${{ steps.params.outputs.vllm_version }} \
+            --build-arg TORCH_CUDA_ARCH_LIST="${{ steps.params.outputs.cuda_arch_list }}" \
+            --build-arg MAX_JOBS=${{ steps.params.outputs.max_jobs }} \
+            --build-arg NVCC_THREADS=1 \
+            --output type=local,dest=./wheels \
+            .
 
-      - name: Build and push Docker image
+      - name: List exported wheel
+        run: |
+          echo "## Exported Wheel" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          ls -lh ./wheels/vllm-*.whl >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "WHEEL_FILE=$(ls ./wheels/vllm-*.whl | head -1 | xargs basename)" >> $GITHUB_ENV
+
+      # Step 2: Build and push minimal runtime image
+      - name: Build and push runtime image
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: ./Dockerfile
+          file: ./Dockerfile.runtime
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          provenance: false
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.params.outputs.vllm_version }}-cu126
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.params.outputs.vllm_version }}-cu126-${{ steps.params.outputs.sm_suffix }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest-cu126
+          labels: |
+            org.opencontainers.image.title=vLLM OpenAI Server
+            org.opencontainers.image.description=vLLM OpenAI-compatible API server (CUDA 12.6)
+            org.opencontainers.image.version=${{ steps.params.outputs.vllm_version }}
+            org.opencontainers.image.vendor=vLLM Project
+            com.nvidia.cuda.version=12.6
+            com.nvidia.gpu.arch=${{ steps.params.outputs.cuda_arch_list }}
           build-args: |
-            VLLM_VERSION=${{ steps.params.outputs.vllm_version }}
+            VLLM_WHEEL=wheels/${{ env.WHEEL_FILE }}
             TORCH_CUDA_ARCH_LIST=${{ steps.params.outputs.cuda_arch_list }}
-            MAX_JOBS=${{ steps.params.outputs.max_jobs }}
           cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache
           cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache,mode=max
 
+      # Upload wheel as artifact
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vllm-wheel-${{ steps.params.outputs.vllm_version }}
+          path: wheels/vllm-*.whl
+          retention-days: 30
+
       - name: Summary
         run: |
+          # Map SM versions to GPU names
+          GPU_MAP=""
+          for sm in ${{ steps.params.outputs.cuda_arch_list }}; do
+            case "$sm" in
+              7.5) GPU_MAP="$GPU_MAP\n| SM 7.5 | Turing | RTX 2080, T4, GTX 1660 |" ;;
+              8.0) GPU_MAP="$GPU_MAP\n| SM 8.0 | Ampere | A100, A6000, A40 |" ;;
+              8.6) GPU_MAP="$GPU_MAP\n| SM 8.6 | Ampere | RTX 3090, RTX 3080, A40 |" ;;
+              8.9) GPU_MAP="$GPU_MAP\n| SM 8.9 | Ada Lovelace | RTX 4090, L40, L4 |" ;;
+              9.0) GPU_MAP="$GPU_MAP\n| SM 9.0 | Hopper | H100, H200 |" ;;
+              *)   GPU_MAP="$GPU_MAP\n| SM $sm | Unknown | Unknown |" ;;
+            esac
+          done
+
           echo "## Build Complete :rocket:" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Parameter | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|-----------|-------|" >> $GITHUB_STEP_SUMMARY
           echo "| vLLM Version | \`${{ steps.params.outputs.vllm_version }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| CUDA Base | 12.6.0 |" >> $GITHUB_STEP_SUMMARY
-          echo "| GPU Architectures | \`${{ steps.params.outputs.cuda_arch_list }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Compute Capabilities | \`${{ steps.params.outputs.cuda_arch_list }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| MAX_JOBS | ${{ steps.params.outputs.max_jobs }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Trigger | ${{ github.event_name }} |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Pull command" >> $GITHUB_STEP_SUMMARY
+          echo "### Supported GPUs" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| SM Version | Architecture | GPUs |" >> $GITHUB_STEP_SUMMARY
+          echo "|------------|-------------|------|" >> $GITHUB_STEP_SUMMARY
+          echo -e "$GPU_MAP" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Pull commands" >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+          echo "# Latest" >> $GITHUB_STEP_SUMMARY
+          echo "docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest-cu126" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "# Specific version" >> $GITHUB_STEP_SUMMARY
           echo "docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.params.outputs.vllm_version }}-cu126" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "# With GPU arch suffix" >> $GITHUB_STEP_SUMMARY
+          echo "docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.params.outputs.vllm_version }}-cu126-${{ steps.params.outputs.sm_suffix }}" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Run" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+          echo "docker run --gpus all -p 8000:8000 \\" >> $GITHUB_STEP_SUMMARY
+          echo "  -v ~/.cache/huggingface:/root/.cache/huggingface \\" >> $GITHUB_STEP_SUMMARY
+          echo "  ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.params.outputs.vllm_version }}-cu126 \\" >> $GITHUB_STEP_SUMMARY
+          echo "  --model meta-llama/Llama-3-8B-Instruct \\" >> $GITHUB_STEP_SUMMARY
+          echo "  --max-model-len 4096" >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
