@@ -60,10 +60,10 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     --extra-index-url https://flashinfer.ai/whl/cu126
 
 # Install vLLM from pre-built wheel
-COPY ${VLLM_WHEEL} /tmp/vllm.whl
+COPY ${VLLM_WHEEL} /tmp/
 RUN --mount=type=cache,target=/root/.cache/pip \
-    python3.12 -m pip install /tmp/vllm.whl \
-    && rm /tmp/vllm.whl
+    python3.12 -m pip install /tmp/*.whl \
+    && rm /tmp/*.whl
 
 WORKDIR /workspace
 
